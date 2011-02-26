@@ -16,7 +16,7 @@ use warnings;
 use base qw(Exporter);
 
 our @EXPORT = map "log_" . ($_), LEVELS;
-our $VERSION = 0.01;
+our $VERSION = 0.02;
 our $SHUSH = 0;
 our $LINE_PREFIX = "";
 
