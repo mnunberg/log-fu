@@ -15,8 +15,10 @@ use strict;
 use warnings;
 use base qw(Exporter);
 
-our @EXPORT = map "log_" . ($_), LEVELS;
-our $VERSION = 0.02;
+our @EXPORT = (map("log_" . ($_), LEVELS));
+our @EXPORT_OK = qw(set_log_level);
+
+our $VERSION = 0.03;
 our $SHUSH = 0;
 our $LINE_PREFIX = "";
 
@@ -102,6 +104,15 @@ foreach my $level (LEVELS) {
 	use strict "refs";
 }
 
+sub set_log_level {
+	my ($pkgname,$level) = @_;
+	$level = eval("LOG_".uc($level));
+	return if !defined $level;
+	return if !exists $sources{$pkgname};
+	$sources{$pkgname}->{level} = $level;
+	return 1;
+}
+
 1;
 
 __END__
@@ -146,6 +157,7 @@ do its thing.
 
 logs a message to the target specified at import with $LEVEL priority
 
+
 =item $SHUSH
 
 Set this to a true value to silence all logging output
@@ -162,6 +174,11 @@ These functions are subject to change and should not be used often. However
 they may be helpful in controlling logging when absolutely necessary
 
 =over
+
+=item Log::Fu::set_log_level($pkgname, $levelstr)
+
+Sets $pkgname's logging level to $levelstr. $levelstr is one of err, debug, info,
+warn, crit etc.
 
 =item _logger($numeric_level_constant, $level_display, $stack_offset, @messages)
 
