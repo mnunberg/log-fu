@@ -29,9 +29,10 @@ use base qw(Exporter);
 use Sys::Syslog;
 
 our @EXPORT = (map("log_" . ($_), LEVELS));
+push @EXPORT, map "log_$_"."f", LEVELS;
 our @EXPORT_OK = qw(set_log_level);
 
-our $VERSION = 0.04;
+our $VERSION = 0.05;
 our $SHUSH = 0;
 our $LINE_PREFIX = "";
 
@@ -73,7 +74,7 @@ $$log_target = *STDERR;
 sub _set_source_level {
 	my ($source,%params) = @_;
 	my $h = \%params;
-	$h->{level} ||= LOG_INFO;
+	$h->{level} = LOG_INFO if !defined $h->{level};
 	$h->{target} ||= $log_target;
 	$sources{$source} = $h;
 	#print Dumper(\%sources);
@@ -127,7 +128,8 @@ foreach my $level (LEVELS) {
 	
 	#format string wrappers
 	*{ $fn_name . "f" } = sub {
-		_logger($const, uc($level), 1, sprintf(@_))
+		my $fmt_str = shift;
+		_logger($const, uc($level), 1, sprintf($fmt_str, @_));
 	};
 	
 	use strict "refs";
@@ -192,14 +194,17 @@ do its thing.
 	use Miner::Logger { target => $some_filehandle, level => "info" };
 	log_debug("this is a debug level message");
 	log_info("this is an info-level message");
+	log_debugf("this is a %s", "format string");
 
 =head2 EXPORTED SYMBOLS
 
 =over
 
 =item log_$LEVEL($message1,$message2...,)
+=item log_${LEVEL}f("put your %s here", "format string")
+logs a message to the target specified at import with $LEVEL priority.
 
-logs a message to the target specified at import with $LEVEL priority
+the *f variants wrap around sprintf
 
 
 =item $SHUSH
@@ -253,7 +258,7 @@ None known
 =head1 TODO
 
 An optional (!!!) format string would be nice. Also, the ability to have functions
-like log_warnf instead of inserting log_warn sprintf.. statements all over
+like log_warnf instead of inserting log_warn sprintf.. statements all over (DONE in 0.05)
 
 =head1 COPYRIGHT
 
