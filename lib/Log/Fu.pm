@@ -2,7 +2,6 @@
 package Log::Fu;
 use strict;
 use warnings;
-
 BEGIN {
 	no strict "refs";
 	my @_strlevels;
@@ -32,13 +31,58 @@ our @EXPORT = (map("log_" . ($_), LEVELS));
 push @EXPORT, map "log_$_"."f", LEVELS;
 our @EXPORT_OK = qw(set_log_level);
 
-our $VERSION = 0.05;
-our $SHUSH = 0;
-our $LINE_PREFIX = "";
+our $VERSION 		= '0.10';
+our $SHUSH 			= 0;
+our $USE_COLOR;
+our $LINE_PREFIX 	= "";
 
 my $ENABLE_SYSLOG;
 my $SYSLOG_FACILITY;
 my $SYSLOG_STDERR_ECHO = 0; 
+
+#Color stuff:
+BEGIN {
+	if ($ENV{LOG_FU_NO_COLOR}) {
+		$USE_COLOR = 0;
+	} else {
+		eval {
+			require Term::Terminfo;
+			Term::Terminfo->import();
+			my $ti = Term::Terminfo->new();
+			my $n_colors = $ti->getnum("colors");
+			if ($n_colors < 8) {
+				#Color logging disabled:
+				die "Must have >= 16 colors!";
+			}
+		};
+		if ($@) {
+			$USE_COLOR = 0;
+		} else {
+			$USE_COLOR = 1;
+		}
+	}
+}
+my %COLORS = (
+	YELLOW	=> 3,
+	WHITE	=> 7,
+	MAGENTA	=> 5,
+	CYAN	=> 6,
+	BLUE	=> 4,
+	GREEN	=> 2,
+	RED		=> 1,
+	BLACK	=> 0,
+);
+
+use constant {
+	COLOR_FG	=> 3,
+	COLOR_BG	=> 4,
+	COLOR_BRIGHT_FG	=> 1,
+	COLOR_INTENSE_FG=> 9,
+	COLOR_DIM_FG	=> 2
+};
+use constant {
+	COLOR_RESET => "\33[0m"
+};
 
 use Data::Dumper;
 use File::Basename qw(basename);
@@ -70,26 +114,32 @@ sub import {
 
 my (%sources,$log_target);
 $$log_target = *STDERR;
+my $def_target_can_use_color = -t STDERR;
 
 sub _set_source_level {
 	my ($source,%params) = @_;
 	my $h = \%params;
 	$h->{level} = LOG_INFO if !defined $h->{level};
 	$h->{target} ||= $log_target;
+	$h->{can_use_color} = -t $h->{target};
 	$sources{$source} = $h;
 	#print Dumper(\%sources);
 }
 
-sub _get_destination {
+#Called to get stuff for per-package personalization
+sub _get_pkg_params {
 	#clandestinely does level checking
 	my ($pkgname, $level) = @_;
 	if(!exists($sources{$pkgname})) {
-		return $log_target;
+		return {
+			target => $log_target,
+			can_use_color => $def_target_can_use_color,
+		};
 	}
 	if($level < $sources{$pkgname}->{level}) {
 		return;
 	}
-	return $sources{$pkgname}->{target};
+	return $sources{$pkgname};
 }
 
 sub _logger {
@@ -99,9 +149,28 @@ sub _logger {
 	my (undef,undef,undef,$subroutine) = caller(1+$stack_offset);
 	$subroutine ||= "-";
 	my ($pkgname,$filename,$line) = caller(0+$stack_offset);
-	my $outfile = _get_destination($pkgname,$level_number);
-	return if !defined $outfile;
+	my $pparams = _get_pkg_params($pkgname, $level_number);
+	return if !defined $pparams;
+	my $outfile = $pparams->{target};
 	my $basename = basename($filename);
+	
+	#Color stuff...
+	if($USE_COLOR && $pparams->{can_use_color}) {
+		my $fmt_begin = "\033[";
+		my $fmt_end = COLOR_RESET;
+		if ($level_number == LOG_ERR || $level_number == LOG_CRIT) {
+			$fmt_begin .= sprintf("%s;%s%sm", COLOR_BRIGHT_FG, COLOR_FG, $COLORS{RED});
+		} elsif ($level_number == LOG_WARN) {
+			$fmt_begin .= sprintf("%s%sm", COLOR_FG, $COLORS{YELLOW});
+		} elsif ($level_number == LOG_DEBUG) {
+			$fmt_begin .= sprintf("%s;%s%sm", COLOR_DIM_FG, COLOR_FG, $COLORS{WHITE});
+		} else {
+			$fmt_begin = "";
+			$fmt_end = "";
+		}
+		$message = $fmt_begin  . $message . $fmt_end;
+	}
+	
 	my $msg = "[$level_name] $basename:$line ($subroutine): $message\n";
 	if ($LINE_PREFIX) {
 		$msg =~ s/^(.)/$LINE_PREFIX $1/gm;
@@ -165,7 +234,7 @@ __END__
 
 =head1 NAME
 
-Log::Fu - Simple logging module and interface with absolutely no required boilerplate
+Log::Fu - Simple logging module and interface with absolutely no required boilerplate - Now in COLOR!
 
 =head1 DESCRIPTION
 
@@ -214,6 +283,12 @@ Set this to a true value to silence all logging output
 =item $LINE_PREFIX
 
 if set, each new line (not message) will be prefixed by this string.
+
+=item $USE_COLOR
+
+Set to one if it's detected that your terminal/output device supports colors.
+You can always set this to 0 to turn it off, or set C<LOG_FU_NO_COLOR> in your
+environment
 
 =back
 
