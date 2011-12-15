@@ -1,7 +1,8 @@
 package Log::Fu::Color;
 use strict;
 use warnings;
-use Log::Fu::Levels;
+use Log::Fu::Common;
+use Log::Fu::Common qw(:levels);
 use base qw(Exporter);
 our @EXPORT = qw(fu_colorize);
 

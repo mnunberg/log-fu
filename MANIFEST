@@ -10,3 +10,4 @@ lib/Log/Fu/Chomp.pm
 
 t/01-functionality.t
 t/02-shorten.t
+t/lf_out_test.pm

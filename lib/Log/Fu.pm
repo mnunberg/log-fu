@@ -16,7 +16,7 @@ our @EXPORT = (map("log_" . ($_), LEVELS));
 push @EXPORT, map "log_$_"."f", LEVELS;
 our @EXPORT_OK = qw(set_log_level);
 
-our $VERSION 		= '0.20';
+our $VERSION 		= '0.22';
 
 our $SHUSH 			= 0;
 our $LINE_PREFIX 	= "";
