@@ -1,91 +1,61 @@
-#!/usr/bin/perl
 package Log::Fu;
 use strict;
 use warnings;
-BEGIN {
-	no strict "refs";
-	my @_strlevels;
-	sub LEVELS() { qw(debug info warn err crit) }
-	my $i = 0;
-	foreach my $c (LEVELS) {
-		*{ "LOG_" . uc($c) } = sub() { $i };
-		$_strlevels[$i] = $c;
-		$i++;
-	}
-	sub _strlevel { $_strlevels[$_[0]] }
-	
-	my @_syslog_levels = map {
-		if ($_ eq 'warn') {
-			"WARNING";
-		} else {
-			uc($_)
-		} } @_strlevels;
-	sub _syslog_level { $_syslog_levels[$_[0]]}
-	#warn is not quite the same as WARNING
-}
-
+use blib;
 use base qw(Exporter);
+use Log::Fu::Common qw(:levels %Config LEVELS fu_term_is_ansi);
+use Log::Fu::Common;
+use Log::Fu::Color;
+use Log::Fu::Chomp;
+use Carp qw(carp);
 use Sys::Syslog;
+use File::Basename qw(basename);
+use Constant::Generate [ map {"FLD_$_"} (qw(FH LVL FMT COLOR ISATTY CODE))];
 
 our @EXPORT = (map("log_" . ($_), LEVELS));
 push @EXPORT, map "log_$_"."f", LEVELS;
 our @EXPORT_OK = qw(set_log_level);
 
-our $VERSION 		= '0.10';
+our $VERSION 		= '0.20';
+
 our $SHUSH 			= 0;
-our $USE_COLOR;
 our $LINE_PREFIX 	= "";
+our $LINE_SUFFIX	= "";
+
+our $TERM_ANSI      = fu_term_is_ansi();
+our $TERM_CLEAR_LINE= $TERM_ANSI;
+
+our $USE_WATCHDOG 	= $ENV{LOG_FU_WATCHDOG};
+our $NO_STRIP		= $ENV{LOG_FU_NO_STRIP};
 
 my $ENABLE_SYSLOG;
 my $SYSLOG_FACILITY;
-my $SYSLOG_STDERR_ECHO = 0; 
+my $SYSLOG_STDERR_ECHO = 0;
 
-#Color stuff:
-BEGIN {
-	if ($ENV{LOG_FU_NO_COLOR}) {
-		$USE_COLOR = 0;
-	} else {
-		eval {
-			require Term::Terminfo;
-			Term::Terminfo->import();
-			my $ti = Term::Terminfo->new();
-			my $n_colors = $ti->getnum("colors");
-			if ($n_colors < 8) {
-				#Color logging disabled:
-				die "Must have >= 16 colors!";
-			}
-		};
-		if ($@) {
-			$USE_COLOR = 0;
-		} else {
-			$USE_COLOR = 1;
+my $CLEAR_LINE_ESC	= "\033[0J";
+#From 0.20
+sub Configure {
+	my %options = @_;
+	
+	if($USE_WATCHDOG) {
+		carp "Changing global logging options..";
+	}
+	
+	foreach my $k (keys %Config) {
+		if(exists $options{$k}) {
+			$Config{$k} = delete $options{$k};
 		}
 	}
+	if(%options) {
+		die "Unknown options: " . join(",", keys %options);
+	}
 }
-my %COLORS = (
-	YELLOW	=> 3,
-	WHITE	=> 7,
-	MAGENTA	=> 5,
-	CYAN	=> 6,
-	BLUE	=> 4,
-	GREEN	=> 2,
-	RED		=> 1,
-	BLACK	=> 0,
-);
 
-use constant {
-	COLOR_FG	=> 3,
-	COLOR_BG	=> 4,
-	COLOR_BRIGHT_FG	=> 1,
-	COLOR_INTENSE_FG=> 9,
-	COLOR_DIM_FG	=> 2
-};
-use constant {
-	COLOR_RESET => "\33[0m"
-};
+#From 0.20
+*AddHandler = *Log::Fu::Chomp::AddHandler;
+*DelHandler = *Log::Fu::Chomp::DelHandler;
 
-use Data::Dumper;
-use File::Basename qw(basename);
+
 sub import {
 	my $h;
 	#check if we're passed an option hashref
@@ -98,14 +68,11 @@ sub import {
 	my($pkgname,undef,undef) = caller();
 	if($pkgname) {
 		my($level,$target) = @{$h}{qw(level target)};
-		if($level) {
-			if (grep { $_ eq $level } LEVELS) {
-				$level = eval("LOG_" . uc($level));
-				my $txt = _strlevel($level);
-				#log_debug("Using level '$txt' for $pkgname");
-			} else {
-				die "unknown log level $level";
-			}
+		$level = "info" unless defined $level;
+		if (grep { $_ eq $level } LEVELS) {
+			$level = eval("LOG_" . uc($level));
+		} else {
+			die "unknown log level $level";
 		}
 		_set_source_level($pkgname, level => $level, target => $target);
 	}
@@ -118,29 +85,36 @@ my $def_target_can_use_color = -t STDERR;
 
 sub _set_source_level {
 	my ($source,%params) = @_;
+	my @datum;
 	my $h = \%params;
-	$h->{level} = LOG_INFO if !defined $h->{level};
-	$h->{target} ||= $log_target;
-	$h->{can_use_color} = -t $h->{target};
-	$sources{$source} = $h;
-	#print Dumper(\%sources);
+	$params{level} = LOG_INFO unless defined $params{level};
+	$params{target} = $log_target unless defined $params{target};
+	@datum[FLD_LVL, FLD_FH] = @params{qw(level target)};
+    if(ref $params{target} eq 'CODE') {
+        $datum[FLD_CODE] = $params{target};
+    } else {
+	    $datum[FLD_COLOR] = -t $datum[FLD_FH];
+	    $datum[FLD_ISATTY] = -t $datum[FLD_FH];
+    }
+	$sources{$source} = \@datum;
 }
+
+my $defpkg_key = '__LOG_FU_DEFAULTS__';
+
+_set_source_level($defpkg_key);
 
 #Called to get stuff for per-package personalization
 sub _get_pkg_params {
 	#clandestinely does level checking
 	my ($pkgname, $level) = @_;
-	if(!exists($sources{$pkgname})) {
-		return {
-			target => $log_target,
-			can_use_color => $def_target_can_use_color,
-		};
-	}
-	if($level < $sources{$pkgname}->{level}) {
-		return;
-	}
-	return $sources{$pkgname};
+    my $ret = $sources{$pkgname};
+    $ret ||= $sources{$defpkg_key};
+    if($level < $ret->[FLD_LVL]) {
+        $ret = undef;
+    }
+    return $ret;
 }
+
 
 sub _logger {
 	return if $SHUSH; #no logging wanted!
@@ -151,33 +125,36 @@ sub _logger {
 	my ($pkgname,$filename,$line) = caller(0+$stack_offset);
 	my $pparams = _get_pkg_params($pkgname, $level_number);
 	return if !defined $pparams;
-	my $outfile = $pparams->{target};
+	my $outfile = $pparams->[FLD_FH];
 	my $basename = basename($filename);
-	
+
 	#Color stuff...
-	if($USE_COLOR && $pparams->{can_use_color}) {
-		my $fmt_begin = "\033[";
-		my $fmt_end = COLOR_RESET;
-		if ($level_number == LOG_ERR || $level_number == LOG_CRIT) {
-			$fmt_begin .= sprintf("%s;%s%sm", COLOR_BRIGHT_FG, COLOR_FG, $COLORS{RED});
-		} elsif ($level_number == LOG_WARN) {
-			$fmt_begin .= sprintf("%s%sm", COLOR_FG, $COLORS{YELLOW});
-		} elsif ($level_number == LOG_DEBUG) {
-			$fmt_begin .= sprintf("%s;%s%sm", COLOR_DIM_FG, COLOR_FG, $COLORS{WHITE});
-		} else {
-			$fmt_begin = "";
-			$fmt_end = "";
-		}
-		$message = $fmt_begin  . $message . $fmt_end;
+	if($Log::Fu::Color::USE_COLOR && $pparams->[FLD_COLOR]) {
+		$message = fu_colorize($level_number, $message);
 	}
-	
+
+	$subroutine = fu_chomp($subroutine);
+
 	my $msg = "[$level_name] $basename:$line ($subroutine): $message\n";
+	
 	if ($LINE_PREFIX) {
-		$msg =~ s/^(.)/$LINE_PREFIX $1/gm;
+		$msg =~ s/^(.)/$LINE_PREFIX$1/mg;
 	}
-	print $outfile $msg;
+	if($LINE_SUFFIX) {
+		$msg =~ s/(.)$/$1$LINE_SUFFIX/mg;
+	}
+	if($pparams->[FLD_ISATTY] && $TERM_CLEAR_LINE) {
+		$msg =~ s/^(.)/$CLEAR_LINE_ESC$1/mg
+		#Clear the rest of the line, too:
+	}
+    if(ref $outfile eq 'CODE') {
+        $outfile->($msg);
+    } else {
+	    print $outfile $msg;
+    }
+	
 	if ($ENABLE_SYSLOG) {
-		syslog(_syslog_level($level_number), $msg);
+		syslog(syslog_level($level_number), $msg);
 	}
 }
 
@@ -194,14 +171,12 @@ foreach my $level (LEVELS) {
 	*{ $fn_name . "_with_offset" } = sub {
 		_logger($const, uc($level), 1 + shift, @_);
 	};
-	
+
 	#format string wrappers
 	*{ $fn_name . "f" } = sub {
 		my $fmt_str = shift;
 		_logger($const, uc($level), 1, sprintf($fmt_str, @_));
-	};
-	
-	use strict "refs";
+	};	
 }
 
 #From 0.03
@@ -210,7 +185,7 @@ sub set_log_level {
 	$level = eval("LOG_".uc($level));
 	return if !defined $level;
 	return if !exists $sources{$pkgname};
-	$sources{$pkgname}->{level} = $level;
+	$sources{$pkgname}->[FLD_LVL] = $level;
 	return 1;
 }
 
@@ -234,7 +209,7 @@ __END__
 
 =head1 NAME
 
-Log::Fu - Simple logging module and interface with absolutely no required boilerplate - Now in COLOR!
+Log::Fu - Simplified and developer-friendly screen logging
 
 =head1 DESCRIPTION
 
@@ -260,37 +235,198 @@ do its thing.
 
 =head1 SYNOPSIS
 
-	use Miner::Logger { target => $some_filehandle, level => "info" };
-	log_debug("this is a debug level message");
+    use Log::Fu;
+    
+	log_debug("this is a debug level message");    
 	log_info("this is an info-level message");
 	log_debugf("this is a %s", "format string");
 
-=head2 EXPORTED SYMBOLS
+=head2 IMPORTING
+
+Usually, doing the following should just work
+
+    use Log::Fu;
+
+This will allow a default level of C<INFO>, and log messages to stderr.
+
+If you need more configuration, you may pass a hashref of options during
+C<use>. The keys recognized are as follows
 
 =over
 
-=item log_$LEVEL($message1,$message2...,)
-=item log_${LEVEL}f("put your %s here", "format string")
-logs a message to the target specified at import with $LEVEL priority.
+=item level
 
-the *f variants wrap around sprintf
+This is the minimum level of severity to display. The available levels from
+least to most severe are C<debug, info, warn, err, crit>
 
+=item target
 
-=item $SHUSH
+This specifies where to log the message or which action to take. This can be
+either a filehandle, in which case the messages will be printed to it, or it
+can be a code reference, in which case it will be called with the formatted
+message as its argument
+
+=back
+
+=head2 EXPORTED SYMBOLS
+
+The main exported functions begin with a C<log_> prefix, and are completed by
+a level specification. This is one of C<debug>, C<info>, C<warn>, C<err> or
+C<crit>. In the examples, C<info> is shown, but may be replaced with any of the
+specifiers.
+
+=over
+
+=item log_info($string1, $string2, ..)
+
+=item log_infof($format, $string...)
+
+Logs a message to the target specified by the package at import time (C<STDERR>
+by default). The first form will just concatenate its arguments together, while
+the second form using a printf-style format string.
+
+If the level specified is below the level of importance specified during import-time
+the message will not be printed.
+
+=back
+
+=head2 Configuration Package Variables
+
+=over
+
+=item $Log::Fu::SHUSH
 
 Set this to a true value to silence all logging output
 
-=item $LINE_PREFIX
+=item $Log::Fu::LINE_PREFIX
 
 if set, each new line (not message) will be prefixed by this string.
 
-=item $USE_COLOR
+=item $Log::Fu::LINE_SUFFIX
+
+If set, this will be placed at the end of each line.
+
+=item $Log::Fu::TERM_CLEAR_LINE
+
+If set to true, C<Log::Fu> will print C<\033[0J> after each line. Handy
+for use in conjunction with linefeed-like status bars
+
+
+=item $Log::Fu::USE_COLOR
 
 Set to one if it's detected that your terminal/output device supports colors.
 You can always set this to 0 to turn it off, or set C<LOG_FU_NO_COLOR> in your
-environment
+environment. As of version 0.20, the C<ANSI_COLORS_DISABLED> environment variable
+is supported as well.
 
 =back
+
+=head2 Caller Information Display
+
+By default, C<Log::Fu> will print out unabbridged caller information which will
+look something like:
+
+	[WARN] demo.pl:30 (ShortNamespace::echo): What about here
+	
+Often, caller information is unbearably long, and for this, an API has been provided
+which allows you to strip and shorten caller/namespace components.
+
+For C<Log::Fu>, caller information is divided into three categories,
+the B<namespace>, the B<intermediate> components, and the function B<basename>.
+
+The function C<My::Very::Long::Namespace::do_something> has a
+top-level-namespace of C<My>, a function basename of C<do_something>,
+and its intermediate components are C<Very::Long::Namespace>.
+
+Currently, this is all accessed by a single function:
+
+=head3 Log::Fu::Configure
+
+This non-exported function will configure stripping/shortening options, or turn
+them off, depending on the options:
+
+Synopsis:
+
+	Log::Fu::Configure(
+		Strip => 1,
+		StripMoreIndicator => '~',
+		StripComponents	   => 2,
+		StripTopLevelNamespace => 0
+	);
+	
+Will configure C<Log::Fu> to display at most two intermediate components,
+and to never shorten the top level namespace. For namespaces shortened, it
+will use the '~' character to indicate this.
+
+The full list of options follow:
+
+=over
+
+=item Strip
+
+This is a boolean value. Set this to 0 to disable all stripping functions.
+
+=item StripMoreIndicator
+
+This is a string. When a component is stripped, it is suffixed with the value
+of this parameter. Something short like '~' (DOS-style) should suffice, and is
+the default.
+
+=item StripMaxComponents
+
+How many intermediate components to allow. If caller information has more
+than this number of intermediate components (excluding the top-level namespace
+and the function basename), they will be stripped, starting from the beginning.
+
+The default value is 2
+
+=item StripKeepChars
+
+When an intermediate component is stripped, it will retain this many characters.
+The default is 2
+
+=item StripTopLevelNamespace
+
+This value is the maximum length of the top-level namespace before it is shortened.
+Set this to 0 (the default) to disable shortening of the top-level namespace
+
+=item StripCallerWidth
+
+The maximum allowable width for caller information before it is processed
+or stripped. Caller information under this limit is not shortened/stripped
+
+=item StripSubBasename
+
+The length of the function basename. If set, functions longer than this value
+will be shortened, with characters being chomped from the I<beginning> of the name.
+
+Set this to 0 (the default) to disable shortening of the function basename.
+
+=back
+
+=head3 Log::Fu::AddHandler($prefix, $coderef)
+
+If more fine-grained control is needed for the printing of debug information, this
+function can be used to add a handler for C<$prefix>. The handler is passed one
+argument (the fully-qualified function name called), and should return a string
+with the new caller information.
+
+Calls originating from packages which contain the string C<$prefix> will be processed
+through this handler.
+
+=head3 Log::Fu::DelHandler($prefix)
+
+Unregister a handler for C<$prefix>, added with L</Log::Fu::AddHandler>
+
+=head3 $Log::Fu::NO_STRIP, $ENV{LOG_FU_NO_STRIP}
+
+Set these to true to disable all stripping/shortening
+
+=head3 $Log::Fu::USE_WATCHDOG, $ENV{LOG_FU_WATCHDOG}
+
+If set to true, C<Log::Fu> will warn whenever its stripping/shortening
+configuration has been changed. This is useful to detect if some offending
+code is changing your logging preferences
 
 =head2 PRIVATE SYMBOLS
 
@@ -312,7 +448,7 @@ Enables logging to syslog. @params are the options passed to L<Sys::Syslog/openl
 
 Stops logging to syslog
 
-=item _logger($numeric_level_constant, $level_display, $stack_offset, @messages)
+=item Log::Fu::_logger($numeric_level_constant, $level_display, $stack_offset, @messages)
 
 $numeric_level_constant is a constant defined in this module, and is currently one
 of LOG_[WARN|DEBUG|ERR|INFO|CRIT]. $level_display is how to pretty-print the level.
@@ -320,7 +456,7 @@ of LOG_[WARN|DEBUG|ERR|INFO|CRIT]. $level_display is how to pretty-print the lev
 A not-so-obvious parameter is $stack_offset, which is the amount of stack frames
 _logger should backtrack to get caller() info. All wrappers use a value of 1.
 
-=item log_$LEVEL_with_offset($offset, @messages)
+=item Log::Fu::log_warn_with_offset($offset, @messages)
 
 like log_*, but allows to specify an offset. Useful in $SIG{__WARN__} or DIE functions
 
@@ -330,12 +466,8 @@ like log_*, but allows to specify an offset. Useful in $SIG{__WARN__} or DIE fun
 
 None known
 
-=head1 TODO
-
-An optional (!!!) format string would be nice. Also, the ability to have functions
-like log_warnf instead of inserting log_warn sprintf.. statements all over (DONE in 0.05)
-
 =head1 COPYRIGHT
 
-Copyright 2011 M. Nunberg for Dynamite Data
+Copyright 2011 M. Nunberg
+
 This module is dual-licensed as GPL/Perl Artistic. See README for details.

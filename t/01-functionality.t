@@ -1,27 +1,30 @@
 #!/usr/bin/perl
 use strict;
 use warnings;
+use Dir::Self;
+use lib __DIR__;
+use lf_out_test qw(logtester $Output);
 use Test::More;
-use IO::String;
-my $fh = IO::String->new();
-
-require "Log/Fu.pm";
-Log::Fu->import({level => "warn", target => $fh});
+use Log::Fu { level => "warn", target => \&logtester };
 *set_log_level = \&Log::Fu::set_log_level;
-
 
 sub check_output {
     my $regex = shift;
-    $fh->seek(0);
-    my $line = $fh->getline();
-    $fh->truncate(0);
-    if (!$regex) {
-        #Negative check:
-        return !$line;
+    my $ret;
+    if($Output) {
+        note $Output;
     }
-    return 0 if !$line;
-    diag "$line";
-    return $line =~ $regex;
+    if(!$regex) {
+        $ret = !$Output;
+    } else {
+        if(defined $Output) {
+            $ret = ($Output =~ $regex);
+        } else {
+            $ret = undef;
+        }
+    }
+    $Output = undef;
+    return $ret;
 }
 
 log_debug("INFO MESSAGE");
