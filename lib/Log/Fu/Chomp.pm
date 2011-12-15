@@ -1,7 +1,6 @@
 package Log::Fu::Chomp;
 use strict;
 use warnings;
-use blib;
 use base qw(Exporter);
 
 our @EXPORT = qw(fu_chomp);

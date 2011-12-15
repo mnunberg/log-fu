@@ -1,7 +1,6 @@
 package Log::Fu;
 use strict;
 use warnings;
-use blib;
 use base qw(Exporter);
 use Log::Fu::Common qw(:levels %Config LEVELS fu_term_is_ansi);
 use Log::Fu::Common;
@@ -16,7 +15,7 @@ our @EXPORT = (map("log_" . ($_), LEVELS));
 push @EXPORT, map "log_$_"."f", LEVELS;
 our @EXPORT_OK = qw(set_log_level);
 
-our $VERSION 		= '0.22';
+our $VERSION 		= '0.25';
 
 our $SHUSH 			= 0;
 our $LINE_PREFIX 	= "";
@@ -27,6 +26,11 @@ our $TERM_CLEAR_LINE= $TERM_ANSI;
 
 our $USE_WATCHDOG 	= $ENV{LOG_FU_WATCHDOG};
 our $NO_STRIP		= $ENV{LOG_FU_NO_STRIP};
+
+our $FORCE_COLOR	= $ENV{LOG_FU_FORCE_COLOR};
+
+our $DISPLAY_SEVERITY = $ENV{LOG_FU_DISPLAY_SEVERITY};
+$DISPLAY_SEVERITY ||= 0;
 
 my $ENABLE_SYSLOG;
 my $SYSLOG_FACILITY;
@@ -127,15 +131,22 @@ sub _logger {
 	return if !defined $pparams;
 	my $outfile = $pparams->[FLD_FH];
 	my $basename = basename($filename);
-
+	
+	my $level_str = "[$level_name] ";
 	#Color stuff...
-	if($Log::Fu::Color::USE_COLOR && $pparams->[FLD_COLOR]) {
+	
+	if( ($Log::Fu::Color::USE_COLOR && $pparams->[FLD_COLOR]) || $FORCE_COLOR) {
 		$message = fu_colorize($level_number, $message);
+		if($DISPLAY_SEVERITY <= 0) {
+			$level_str = "";
+		}
+	} elsif($DISPLAY_SEVERITY == -1) {
+		$level_str = "";
 	}
 
 	$subroutine = fu_chomp($subroutine);
-
-	my $msg = "[$level_name] $basename:$line ($subroutine): $message\n";
+	
+	my $msg = "$level_str$basename:$line ($subroutine): $message\n";
 	
 	if ($LINE_PREFIX) {
 		$msg =~ s/^(.)/$LINE_PREFIX$1/mg;
@@ -428,6 +439,19 @@ If set to true, C<Log::Fu> will warn whenever its stripping/shortening
 configuration has been changed. This is useful to detect if some offending
 code is changing your logging preferences
 
+=head2 SEVERITY DISPLAY
+
+As of version 0.23, displaying of severity information (e.g. C<[INFO]>)
+is disabled if colors are enabled. This is because the colors themselves uniquely
+identify the severity level.
+
+=head3 $Log::Fu::DISPLAY_SEVERITY, $ENV{LOG_FU_DISPLAY_SEVERITY}
+
+This option controls the printing of severity messages. If set to 0 (the default),
+then the default behavior mentioned above is assumed. If greater than zero,
+the severity level is always printed. If less than zero, then the severity
+level is never printed
+
 =head2 PRIVATE SYMBOLS
 
 These functions are subject to change and should not be used often. However
@@ -465,6 +489,11 @@ like log_*, but allows to specify an offset. Useful in $SIG{__WARN__} or DIE fun
 =head1 BUGS
 
 None known
+
+=head1 TODO
+
+Allow an option for user defined C<~/.logfu> preferences, so that presets can be
+selected.
 
 =head1 COPYRIGHT
 

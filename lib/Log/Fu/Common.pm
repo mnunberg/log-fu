@@ -24,25 +24,30 @@ push @EXPORT, qw(syslog_level LEVELS);
 our %Config;
 
 push @EXPORT_OK, '%Config';
-
-my $term_re = qr/^(?:
-xterm
-xterm-color
-rxvt
-urxvt
-rxvt-unicode
-screen
-tmux
-konsole
-gnome-terminal
-vt100
-linux
-ansi
-cygwin
-)$/x;
+my @ansi_terms = qw(
+    xterm
+    xterm-color
+    rxvt
+    urxvt
+    mlterm
+    gnome-terminal
+    konsole
+    screen
+    tmux
+    v100
+    linux
+    ansi
+    cygwin
+);
 
 sub fu_term_is_ansi {
-    defined $ENV{TERM} and $ENV{TERM} =~ $term_re;
+    if(defined $ENV{TERM}) {
+        foreach my $term (@ansi_terms) {
+            return 1 if (index($ENV{TERM}, $term) >= 0)
+        }
+    }
+    return 0;
 }
+
 push @EXPORT, 'fu_term_is_ansi';
 
