@@ -9,13 +9,20 @@ use Log::Fu::Chomp;
 use Carp qw(carp);
 use Sys::Syslog;
 use File::Basename qw(basename);
-use Constant::Generate [ map {"FLD_$_"} (qw(FH LVL FMT COLOR ISATTY CODE))];
 
-our @EXPORT = (map("log_" . ($_), LEVELS));
+use Constant::Generate [ map {"FLD_$_"} (qw(FH LVL FMT COLOR ISATTY CODE))];
+use Constant::Generate [qw(
+	LOGFN_TYPE_LIST
+	LOGFN_TYPE_SUB_PLAIN
+	LOGFN_TYPE_SUB_FMT
+)], -start_at => 1;
+
+our @EXPORT = ( map { ("log_$_", "elog_$_" ) } (LEVELS) );
 push @EXPORT, map "log_$_"."f", LEVELS;
+push @EXPORT, map "elog_$_"."f", LEVELS;
 our @EXPORT_OK = qw(set_log_level);
 
-our $VERSION 		= '0.25';
+our $VERSION 		= '0.30';
 
 our $SHUSH 			= 0;
 our $LINE_PREFIX 	= "";
@@ -59,30 +66,6 @@ sub Configure {
 *AddHandler = *Log::Fu::Chomp::AddHandler;
 *DelHandler = *Log::Fu::Chomp::DelHandler;
 
-
-sub import {
-	my $h;
-	#check if we're passed an option hashref
-	foreach my $i (0..$#_) {
-		if(ref($_[$i]) eq "HASH") {
-			$h = delete $_[$i];
-		}
-	}
-	#get the filename of the code that's using us.
-	my($pkgname,undef,undef) = caller();
-	if($pkgname) {
-		my($level,$target) = @{$h}{qw(level target)};
-		$level = "info" unless defined $level;
-		if (grep { $_ eq $level } LEVELS) {
-			$level = eval("LOG_" . uc($level));
-		} else {
-			die "unknown log level $level";
-		}
-		_set_source_level($pkgname, level => $level, target => $target);
-	}
-	goto &Exporter::import;
-}
-
 my (%sources,$log_target);
 $$log_target = *STDERR;
 my $def_target_can_use_color = -t STDERR;
@@ -107,6 +90,36 @@ my $defpkg_key = '__LOG_FU_DEFAULTS__';
 
 _set_source_level($defpkg_key);
 
+
+
+sub import {
+	my $h;
+	#check if we're passed an option hashref
+	foreach my $i (0..$#_) {
+		if(ref($_[$i]) eq "HASH") {
+			$h = delete $_[$i];
+		}
+	}
+	#get the filename of the code that's using us.
+	my $pkgname = caller();
+	
+	my($ulevel,$target,$subs,$prefix) =
+		delete @{$h}{qw(level target subs function_prefix)};
+		
+	$prefix ||= "";
+	$ulevel = "info" unless defined $ulevel;
+	my $level = eval("LOG_".uc($ulevel));
+	die "Unknown level $ulevel" unless defined $level;
+	_set_source_level($pkgname, level => $level, target => $target);
+	if($subs) {
+		_gen_subsubs($pkgname, $prefix);
+	} else {
+		_gen_listsubs($pkgname, $prefix);
+		_gen_subsubs($pkgname, $prefix."e");
+	}
+	return 1;
+}
+
 #Called to get stuff for per-package personalization
 sub _get_pkg_params {
 	#clandestinely does level checking
@@ -122,19 +135,37 @@ sub _get_pkg_params {
 
 sub _logger {
 	return if $SHUSH; #no logging wanted!
-	my ($level_number, $level_name, $stack_offset, @messages) = @_;
-	my $message = join(" ", @messages);
-	my (undef,undef,undef,$subroutine) = caller(1+$stack_offset);
-	$subroutine ||= "-";
+	my ($level_number, $level_name, $stack_offset, $type, @messages) = @_;
+	
 	my ($pkgname,$filename,$line) = caller(0+$stack_offset);
 	my $pparams = _get_pkg_params($pkgname, $level_number);
 	return if !defined $pparams;
+
+	my (undef,undef,undef,$subroutine) = caller(1+$stack_offset);
+	$subroutine ||= "-";
 	my $outfile = $pparams->[FLD_FH];
 	my $basename = basename($filename);
-	
 	my $level_str = "[$level_name] ";
-	#Color stuff...
 	
+	my $message;
+	if($type == LOGFN_TYPE_LIST) {
+		$message = join(" ", @messages);
+	} else {
+		my $sub = $messages[0]
+			or die "Sub-style logging requested but no sub provided";
+		@messages = $sub->();
+		
+		if($type == LOGFN_TYPE_SUB_PLAIN) {
+			$message = join(" ", @messages);
+		} elsif($type == LOGFN_TYPE_SUB_FMT) {
+			my $fmt_str = $messages[0];
+			$message = sprintf($fmt_str, @messages[1..$#messages]);
+		} else {
+			die("Unknown logging mode $type");
+		}
+	}
+
+	#Color stuff...
 	if( ($Log::Fu::Color::USE_COLOR && $pparams->[FLD_COLOR]) || $FORCE_COLOR) {
 		$message = fu_colorize($level_number, $message);
 		if($DISPLAY_SEVERITY <= 0) {
@@ -174,21 +205,61 @@ foreach my $level (LEVELS) {
 	my $fn_name = "log_$level";
 	no strict "refs";
 	my $const = &{uc("LOG_" . $level)};
-	*{ $fn_name } = sub {
-		_logger($const, uc($level), 1, @_)
-	};
-	
 	#Offset wrappers
 	*{ $fn_name . "_with_offset" } = sub {
-		_logger($const, uc($level), 1 + shift, @_);
+		_logger($const, uc($level), 1 + shift, LOGFN_TYPE_LIST, @_);
 	};
-
-	#format string wrappers
-	*{ $fn_name . "f" } = sub {
-		my $fmt_str = shift;
-		_logger($const, uc($level), 1, sprintf($fmt_str, @_));
-	};	
 }
+
+my %export_cache;
+
+sub _gen_listsubs {
+	my ($pkgname,$prefix) = @_;
+	$prefix ||= "";
+	foreach my $level (LEVELS) {
+		my $fn_name = $pkgname .  "::$prefix" . "log_$level";
+		next if exists $export_cache{$fn_name};
+		$export_cache{$fn_name} = 1;
+		no strict 'refs';
+		my $const = &{uc("LOG_$level")};
+		*{ $fn_name } = sub {
+			@_ = ($const,uc($level),0,LOGFN_TYPE_LIST,@_);
+			goto &_logger;
+		};
+		
+		*{ $fn_name . "f" } = sub {
+			@_ = ($const,uc($level),0,LOGFN_TYPE_LIST,
+				  sprintf($_[0], @_[1..$#_]));
+			goto &_logger;
+		};
+	}
+}
+
+sub _gen_subsubs {
+	my ($pkgname,$prefix) = @_;
+	$prefix ||= "";
+	foreach my $level (LEVELS) {
+		my $fn_name = $pkgname . "::$prefix" . "log_$level";
+		next if exists $export_cache{$fn_name};
+		$export_cache{$fn_name} = 1;
+		
+		no strict 'refs';
+		my $const = &{uc("LOG_".$level)};
+		
+		*{$fn_name} = sub (&) {
+			@_ = ($const,uc($level), 0, LOGFN_TYPE_SUB_PLAIN, $_[0]);
+			goto &_logger;
+		};
+		
+		*{$fn_name . "f"} = sub (&) {
+			@_ = ($const, uc($level), 0, LOGFN_TYPE_SUB_FMT, $_[0]);
+			goto &_logger;
+		};
+	}
+}
+
+_gen_subsubs(__PACKAGE__, "e");
+_gen_listsubs(__PACKAGE__, "");
 
 #From 0.03
 sub set_log_level {
@@ -251,6 +322,7 @@ do its thing.
 	log_debug("this is a debug level message");    
 	log_info("this is an info-level message");
 	log_debugf("this is a %s", "format string");
+	elog_debugf { die("This will not get evaluated") for (0..1_000) };
 
 =head2 IMPORTING
 
@@ -277,6 +349,29 @@ either a filehandle, in which case the messages will be printed to it, or it
 can be a code reference, in which case it will be called with the formatted
 message as its argument
 
+=item subs
+
+If set to true, will apply the behavior and calling convention of the
+conditionally-evaluating C<e*> functions to the non-prefix versions, allowing
+partial compatibility with L<Log::Contextual>.
+
+	use Log::Fu { level => "warn", subs => 1 };
+	log_warnf { "This is a warning" };
+
+=item function_prefix
+
+If set, its value will be used as the prefix for all the exported function. Hence:
+
+	use Log::Fu { prefix => 'logfu_', level => 'debug' };
+	
+	logfu_log_info("Hi");
+	logfu_elog_warn { "bye" };
+	
+This option is useful if using several logging modules, or perhaps for migration.
+
+In the future, we might actually try to make this into a regex or something, to
+customize the log names even more.
+
 =back
 
 =head2 EXPORTED SYMBOLS
@@ -292,9 +387,24 @@ specifiers.
 
 =item log_infof($format, $string...)
 
+=item elog_info { $string1, $string2 };
+
+=item elog_infof { $format, $string, ... };
+
 Logs a message to the target specified by the package at import time (C<STDERR>
-by default). The first form will just concatenate its arguments together, while
-the second form using a printf-style format string.
+by default). The first form will just concatenate its arguments together
+
+The C<*f> suffix denotes that the function will take the arguments to be parameters
+for C<sprintf> and be interpreted as a format string and its arguments.
+
+B<New in v0.30>
+
+The C<e*> variants take a CODE reference which will return a list of parameters,
+suitable for the non-C<e*> variants.
+
+The C<e*> variants will B<not> evaluate their arguments if the severity level
+is under the one specified; that is, the encapsulating subroutine will not be
+called. This is in the spirit of L<Log::Contextual>
 
 If the level specified is below the level of importance specified during import-time
 the message will not be printed.
@@ -329,6 +439,15 @@ Set to one if it's detected that your terminal/output device supports colors.
 You can always set this to 0 to turn it off, or set C<LOG_FU_NO_COLOR> in your
 environment. As of version 0.20, the C<ANSI_COLORS_DISABLED> environment variable
 is supported as well.
+
+=item $Log::Fu::FORCE_COLOR, $ENV{LOG_FU_FORCE_COLOR}
+
+This forces color output, overriding any terminal or output detection scheme.
+This is handy when you do the following
+
+	$ LOG_FU_FORCE_COLOR=1 ./my_script.pl 2>&1 | less -R
+	
+As it allows you to see large amounts of output in your color-capable pager.
 
 =back
 
@@ -497,6 +616,6 @@ selected.
 
 =head1 COPYRIGHT
 
-Copyright 2011 M. Nunberg
+Copyright 2011-2012 M. Nunberg
 
 This module is dual-licensed as GPL/Perl Artistic. See README for details.

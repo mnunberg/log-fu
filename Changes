@@ -1,4 +1,8 @@
 Revision history for Log-Fu
+0.35    Feb 5 2012
+        elog_* functions, for non-evaluation of arguments
+        when level is disabled
+        
 0.25    ""
         Yet more features. Severity display tweaking
 
@@ -7,7 +11,7 @@ Revision history for Log-Fu
 
 0.21    ""
         Forgot to move crap around
-0.20    Dev 15 2011
+0.20    Dec 15 2011
         More features, stripping, etc.
 
 0.01    Date/time
