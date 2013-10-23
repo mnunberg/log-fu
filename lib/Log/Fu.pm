@@ -22,7 +22,7 @@ push @EXPORT, map "log_$_"."f", LEVELS;
 push @EXPORT, map "elog_$_"."f", LEVELS;
 our @EXPORT_OK = qw(set_log_level);
 
-our $VERSION 		= '0.30';
+our $VERSION 		= '0.31';
 
 our $SHUSH 			= 0;
 our $LINE_PREFIX 	= "";
