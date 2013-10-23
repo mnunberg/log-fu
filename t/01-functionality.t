@@ -43,7 +43,7 @@ log_warn("This warning message shouldn't appear");
 ok(check_output(undef), "WARN doesn't display");
 
 ok(set_log_level(__PACKAGE__, "DEBUG"), "changed log level to debug");
-foreach my $lvl qw(debug info warn err crit) {
+foreach my $lvl (qw(debug info warn err crit)) {
     no strict "refs";
     &{"log_$lvl"}($lvl);
     ok(check_output(qr/$lvl/i), "$lvl printed");
